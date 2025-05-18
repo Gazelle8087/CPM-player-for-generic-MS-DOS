@@ -406,7 +406,7 @@ bios_write:
 bios_sectran:
 		jmp	bios_no_error
 ;======================================
-open_msg		db	'CP/M 2.2 player for generic MS-DOS Rev. 1.10  '
+open_msg		db	'CP/M 2.2 player for generic MS-DOS Rev. 1.10  ',0dh,0ah
 			db	'Copyright (c) 2024, 2025 by Gazelle',0dh,0ah,0ah,24h
 no_mem_msg		db	'No enough memory.$'
 em_open_error_msg	db	'Z80EM.BIN open error.$'
