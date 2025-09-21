@@ -1,0 +1,1301 @@
+Microsoft (R) Macro Assembler Version 6.00AD    	    09/21/25 12:54:36
+z80v.asm						     Page 1 - 1
+
+
+				;	CP/M 2.2 player for generic MS-DOS Rev. 1.10
+				;
+				;	Copyright (C) 2024 by Gazelle
+				;
+				;Permission is hereby granted, free of charge, to any person
+				;obtaining a copy of this software and associated documentation
+				;files (the "Software"), to deal in the Software without
+				;restriction, including without limitation the rights to use,
+				;copy, modify, merge, publish, distribute, sublicense, and/or sell
+				;copies of the Software, and to permit persons to whom the
+				;Software is furnished to do so, subject to the following
+				;conditions:
+				;
+				;The above copyright notice and this permission notice shall be
+				;included in all copies or substantial portions of the Software.
+				;
+				;THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+				;EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+				;OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+				;NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+				;HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+				;WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+				;FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+				;OTHER DEALINGS IN THE SOFTWARE.
+
+				;Repository https://github.com/Gazelle8087/CPM-player-for-generic-MS-DOS
+				;
+				;2024/8/22 Rev. 1.00 Initial release
+				;2025/5/18 Rev. 1.10 Convert CP/M arguments to uppercase.
+				;                    Change CPU instruction execution module to Z80EM.BIN
+				;                    Change name 80 to Z80
+
+						page 0,150
+						.model	tiny
+ 0000						.code
+
+						org	100h
+
+						assume	ds:nothing,es:nothing,ss:nothing
+
+ 0100  E9 0234			start:		jmp	hajime
+						align	2
+
+ 0104 0000			save_bp		dw	?
+ 0106 0000			save_di		dw	?
+ 0108 0000			save_si		dw	?
+ 010A 0000			save_cx		dw	?
+ 010C 0000			save_dx		dw	?
+ 010E 0000			z80_seg		dw	?
+ 0110 0000			em_file_handle	dw	?
+ 0112 0000			cpm_file_handle	dw	?
+ 0114 0000			cpm_arg_offset	dw	?
+ 0116 0000			fcb_addr	dw	?
+ 0118 00			path_flag	db	0
+ 0119 00			env_flag	db	0
+ 011A 00			drv_flag	db	0
+ 011B 0000			file_name_end	dw	?
+
+ = di				ret_reg		equ	di
+ = bp				entry_SP	equ	bp
+
+ = 00FF				int_no		equ	0ffh
+
+ 011D 2E 43 4F 4D 00		com_str			db	'.COM',0
+ 0122 2E 43 50 4D 00		cpm_str			db	'.CPM',0
+ 0127 5A 5F 45 4D 3D		env_key			db	'Z_EM='
+ 012C 5A 38 30 45 4D 56		em_file_name0		db	'Z80EMV.BIN',0
+       2E 42 49 4E 00
+ 0137				em_file_name0_end:
+ 0137  0080 [			env_str			db	128 dup (0)
+        00
+       ]
+ 01B7  0080 [			em_file_name		db	128 dup (?)
+        00
+       ]
+ 0237  0080 [			cpm_file_name		db	128 dup (?)
+        00
+       ]
+ 02B7  0080 [			buffer_area		db	128 dup (?)
+        00
+       ]
+
+				;---------------------------------------------
+
+ 0337  8C C8			hajime:		mov	ax,cs
+ 0339  8E C0					mov	es,ax
+ 033B  8E D8					mov	ds,ax
+ 033D  BA 0600 R				mov	dx,offset open_msg
+ 0340  B4 09					mov	ah,9
+ 0342  CD 21					int	21h
+ 0344  B4 4A					mov	ah,4ah		;Free up memory leaving 128KB
+ 0346  BB 3001					mov	bx,3001h
+ 0349  CD 21					int	21h
+ 034B  73 03					jnc	main_read_emulator
+ 034D  E9 03FA					jmp	no_mem
+ 0350				main_read_emulator:
+ 0350  8C C8					mov	ax,cs
+ 0352  8E D0					mov	ss,ax
+ 0354  BC F000					mov	sp,0f000h
+ 0357  05 1000					add	ax,1000h
+ 035A  A9 0001					test	ax,1
+ 035D  74 01					jz	em_seg_even
+ 035F  40					inc	ax
+ 0360  2E: A3 03BC R		em_seg_even:	mov	em_seg,ax
+ 0364  05 1000					add	ax,1000h
+ 0367  2E: A3 010E R				mov	z80_seg,ax
+
+ 036B  E8 03FD					call	search_env
+
+ 036E  E8 0465					call	read_emulator
+
+ 0371  E8 04DB					call	read_cpm_file
+
+ 0374  E8 05F5					call	setup_cpm_area
+
+				;--------------------------------------
+
+ 0377  BE 0100					mov	si,100h		;PC reg in Z80
+ 037A  33 FF					xor	ret_reg,ret_reg
+ 037C  8E C7					mov	es,ret_reg
+ 037E  26: 89 36 03FC				mov	es:[int_no*4],si
+ 0383  2E: 8E 1E 010E R				mov	ds,z80_seg
+ 0388  26: 8C 1E 03FE				mov	es:[int_no*4+2],ds
+ 038D  2E: 8E 06 010E R				mov	es,z80_seg
+ 0392  BD FF82					mov	entry_SP,CPM_BDOS-2	;SP
+ 0395  3E: C7 46 00 0000			mov	ds:[entry_SP],word ptr 0
+ 039B  2E: 89 2E 0104 R				mov	save_bp,entry_SP
+
+ 03A0  BA 0080					mov	dx,80h
+ 03A3  B4 1A					mov	ah,1ah
+ 03A5  CD 21					int	21h
+ 03A7  FC					cld
+ 03A8				go_cpm:
+ 03A8				no_op:
+ 03A8  2E: 8B 2E 0104 R				mov	entry_SP,save_bp
+ 03AD  33 FF					xor	ret_reg,ret_reg
+ 03AF  2E: 8E 1E 010E R				mov	ds,z80_seg
+ 03B4  2E: 8E 06 010E R				mov	es,z80_seg
+				;		mov	cx,save_cx
+				;		mov	dx,save_dx
+
+ 03B9  9A					db	09ah	;CALL far
+ 03BA  00C0					dw	0c0h	;Z80 emulator entry point
+ 03BC 0000			EM_SEG		dw	?	;emulator loading segment
+
+				;		mov	save_dx,dx
+				;		mov	save_cx,cx
+				;		mov	save_bp,bp
+				;		mov	save_si,si
+ 03BE  83 FF 00					cmp	ret_reg,0	;exit by ED FD ?
+ 03C1  74 03 E9 00AA				jnz	z80_error
+
+ 03C6  33 F6					xor	si,si
+ 03C8  8E C6					mov	es,si
+ 03CA  3E: 8B 76 00				mov	si,ds:[entry_SP]
+ 03CE  26: 89 36 03FC				mov	es:[int_no*4],si
+ 03D3  83 C5 02					add	entry_SP,2
+ 03D6  2E: 89 2E 0104 R				mov	save_bp,entry_SP
+
+ 03DB  3C 00					cmp	al,0			;BDOS模擬ルーチンでは AL=0を設定
+ 03DD  74 0F					je	to_bdos
+
+ 03DF  3C 10					cmp	al,10h			;BIOS1模擬ルーチンでは AL=BIOS番号を設定
+ 03E1  77 47					ja	bios_no_error
+ 03E3  8A D8					mov	bl,al
+ 03E5  B7 00					mov	bh,0
+ 03E7  03 DB					add	bx,bx
+ 03E9  2E: FF A7 05AF R				jmp	word ptr cs:[bx+bios_table]
+
+ 03EE  80 F9 28			to_bdos:	cmp	cl,28h
+ 03F1  77 3E					ja	bdos_no_error
+ 03F3  8A D9					mov	bl,cl
+ 03F5  B7 00					mov	bh,0
+ 03F7  03 DB					add	bx,bx
+ 03F9  2E: FF A7 04F6 R				jmp	word ptr cs:[bx+bdos_table]
+
+				;---------------------------------
+ 03FE 49 6E 63 6F 6D 70		bdos_no_error_msg	db	'Incompatible bdos no $'
+       61 74 69 62 6C 65
+       20 62 64 6F 73 20
+       6E 6F 20 24
+ 0414 49 6E 63 6F 6D 70		bios_no_error_msg	db	'Incompatible bios no $'
+       61 74 69 62 6C 65
+       20 62 69 6F 73 20
+       6E 6F 20 24
+
+ 042A				BIOS_no_error:
+ 042A  8A C8					mov	cl,al
+ 042C  BA 0414 R				mov	dx,offset bios_no_error_msg
+ 042F  EB 03					jmp	bdos_bios_em_err
+ 0431				BDOS_no_error:
+ 0431  BA 03FE R				mov	dx,offset bdos_no_error_msg
+ 0434				bdos_bios_em_err:
+ 0434  8C C8					mov	ax,cs
+ 0436  8E D8					mov	ds,ax
+ 0438  B4 09					mov	ah,9
+ 043A  CD 21					int	21h
+ 043C  8A C1					mov	al,cl
+ 043E  E8 0642					call	dsphex2
+ 0441  B8 4C00					mov	ax,4c00h
+ 0444  CD 21					int	21h
+
+				;---------------------------------
+ 0446 55 6E 64 65 66 69		Z80em_undef_msg		db	'Undefined code $'
+       6E 65 64 20 63 6F
+       64 65 20 24
+ 0456 55 6E 65 78 65 63		Z80em_unexec_msg	db	'Unexecutable code $'
+       75 74 61 62 6C 65
+       20 63 6F 64 65 20
+       24
+ 0469 20 61 74 20 24		Z80em_error_msg		db	' at $'
+ 046E 0000			z80em_err_addr		dw	?
+
+ 0470  BA 0456 R		Z80_error:	mov	dx,offset z80em_unexec_msg
+ 0473  B9 0001					mov	cx,1
+ 0476  BB 0001					mov	bx,1
+ 0479  83 FF 01					cmp	ret_reg,1
+ 047C  74 48					je	z80_error_0
+
+ 047E  B9 0002					mov	cx,2
+ 0481  BB 0001					mov	bx,1
+ 0484  83 FF 02					cmp	ret_reg,2
+ 0487  74 3D					je	z80_error_0
+
+ 0489  B9 0002					mov	cx,2
+ 048C  BB 0001					mov	bx,1
+ 048F  83 FF 03					cmp	ret_reg,3
+ 0492  74 32					je	z80_error_0
+
+ 0494  B9 0002					mov	cx,2
+ 0497  BB 0002					mov	bx,2
+ 049A  83 FF 04					cmp	ret_reg,4
+ 049D  74 27					je	z80_error_0
+
+ 049F  BA 0446 R				mov	dx,offset z80em_undef_msg
+ 04A2  B9 0002					mov	cx,2
+ 04A5  BB 0002					mov	bx,2
+ 04A8  83 FF 05					cmp	ret_reg,5
+ 04AB  74 19					je	z80_error_0
+
+ 04AD  B9 0004					mov	cx,4
+ 04B0  BB 0004					mov	bx,4
+ 04B3  83 FF 06					cmp	ret_reg,6
+ 04B6  74 0E					je	z80_error_0
+
+ 04B8  B9 0001					mov	cx,1
+ 04BB  BB 0001					mov	bx,1
+ 04BE  83 FF 07					cmp	ret_reg,7
+ 04C1  74 03					je	z80_error_0
+
+ 04C3  E9 0293					jmp	z80em_internal_error
+
+ 04C6  8C C8			z80_error_0:	mov	ax,cs
+ 04C8  8E D8					mov	ds,ax
+ 04CA  B4 09					mov	ah,9
+ 04CC  CD 21					int	21h
+
+ 04CE  2B F3					sub	si,bx
+ 04D0  2E: 89 36 046E R				mov	z80em_err_addr,si
+ 04D5  2E: 8E 06 010E R				mov	es,z80_seg
+ 04DA				z80_error_6:
+ 04DA  26: 8A 04				mov	al,es:[si]
+ 04DD  E8 05A3					call	dsphex2
+ 04E0  46					inc	si
+ 04E1  E2 F7					loop	z80_error_6
+ 04E3  BA 0469 R				mov	dx,offset z80em_error_msg
+ 04E6  B4 09					mov	ah,9
+ 04E8  CD 21					int	21h
+ 04EA  2E: A1 046E R				mov	ax,z80em_err_addr
+ 04EE  E8 0587					call	dsphex4
+ 04F1  B8 4C00					mov	ax,4c00h
+ 04F4  CD 21					int	21h
+
+				;--------------------------------------
+						even
+ 04F6 0548 R			bdos_table	dw	sonomama	;0  system reset
+ 04F8  0548 R					dw	sonomama	;1  input from console
+ 04FA  0548 R					dw	sonomama	;2  output to consple
+ 04FC  0548 R					dw	sonomama	;3  input from reader
+ 04FE  0548 R					dw	sonomama	;4  output to punch
+ 0500  0548 R					dw	sonomama	;5  output to printer
+ 0502  0548 R					dw	sonomama	;6  direct console I/O
+ 0504  055F R					dw	get_io_byte	;7  get io byte
+ 0506  0565 R					dw	set_io_byte	;8  set io byte
+ 0508  0548 R					dw	sonomama	;9  output string to console
+ 050A  0548 R					dw	sonomama	;A  bufferd input from console
+ 050C  054F R					dw	bdos_const	;B  check console status
+ 050E  056C R					dw	get_version	;C  get version no
+ 0510  0548 R					dw	sonomama	;D  disk reset
+ 0512  0548 R					dw	sonomama	;E  disk select
+ 0514  0548 R					dw	sonomama	;F  open
+ 0516  0548 R					dw	sonomama	;10 close
+ 0518  0572 R					dw	file_search1	;11 search first
+ 051A  057E R					dw	file_search2	;12 search next
+ 051C  0548 R					dw	sonomama	;13 delete
+ 051E  058A R					dw	bdos_read	;14 read seaquential
+ 0520  0548 R					dw	sonomama	;15 write seaquential
+ 0522  0548 R					dw	sonomama	;16 create
+ 0524  0548 R					dw	sonomama	;17 rename
+ 0526  05AC R					dw	get_login_vect	;18 get login vector
+ 0528  0548 R					dw	sonomama	;19 get current drive
+ 052A  0548 R					dw	sonomama	;1A set DMA addr
+ 052C  05AC R					dw	get_alloc_addr	;1B get allocation addr
+ 052E  05AC R					dw	set_ro		;1C set R/O
+ 0530  05AC R					dw	get_ro_vect	;1D get R/O vector
+ 0532  05AC R					dw	set_file_attr	;1E set file attrib
+ 0534  05AC R					dw	get_DPB_addr	;1F get DPB addr
+ 0536  0597 R					dw	get_set_user	;20 get/set user code
+ 0538  0548 R					dw	sonomama	;21 read random
+ 053A  0548 R					dw	sonomama	;22 write random
+ 053C  0548 R					dw	sonomama	;23 get file size
+ 053E  0548 R					dw	sonomama	;24 set random record
+ 0540  05AC R					dw	reset_disk2	;25 reset disk by vector
+ 0542  03A8 R					dw	no_op		;26
+ 0544  03A8 R					dw	no_op		;27
+ 0546  0548 R					dw	sonomama	;28 write random w/zero fill
+
+ 0548  8A E1			sonomama:	mov	ah,cl
+ 054A  CD 21					int	21h
+ 054C  E9 FE59					jmp	go_cpm
+
+ 054F  B4 0B			bdos_const:	mov	ah,0bh
+ 0551  BB 0001					mov	bx,1
+ 0554  CD 21					int	21h
+ 0556  3C 00					cmp	al,0
+ 0558  74 02					je	bdos_noready
+ 055A  B0 01					mov	al,1
+ 055C  E9 FE49			bdos_noready:	jmp	go_cpm
+
+ 055F  A0 0003			get_io_byte:	mov	al,ds:[0003]
+ 0562  E9 FE43					jmp	go_cpm
+
+ 0565  88 16 0003		set_io_byte:	mov	ds:[0003],dl
+ 0569  E9 FE3C					jmp	go_cpm
+
+ 056C  BB 0022			get_version:	mov	bx,22h
+ 056F  E9 FE36					jmp	go_cpm
+
+ 0572  2E: 89 16 0116 R		file_search1:	mov	fcb_addr,dx
+ 0577  B4 11					mov	ah,11h
+ 0579  CD 21					int	21h
+ 057B  E9 FE2A					jmp	go_cpm
+
+ 057E  2E: 8B 16 0116 R		file_search2:	mov	dx,fcb_addr
+ 0583  B4 12					mov	ah,12h
+ 0585  CD 21					int	21h
+ 0587  E9 FE1E					jmp	go_cpm
+
+ 058A  B4 14			bdos_read:	mov	ah,14h
+ 058C  CD 21					int	21h
+ 058E  3C 03					cmp	al,3
+ 0590  75 02					jne	bdos_read_exit
+ 0592  B0 00					mov	al,0
+ 0594  E9 FE11			bdos_read_exit:	jmp	go_cpm
+
+ 0597				get_set_user:
+ 0597  80 FA FF					cmp	dl,0ffh
+ 059A  75 05					jne	set_user_code
+ 059C  B0 00					mov	al,0
+ 059E  E9 FE07					jmp	go_cpm
+
+ 05A1  80 FA 00			set_user_code:	cmp	dl,0
+ 05A4  74 03					je	set_user_code_0
+ 05A6  E9 FE88					jmp	bdos_no_error
+ 05A9  E9 FDFC			set_user_code_0:jmp	go_cpm
+
+ 05AC				bdos_reader:	;3  input from reader
+ 05AC				bdos_punch:	;4  output to punch
+ 05AC				get_login_vect:	;18 get login vector
+ 05AC				get_alloc_addr:	;1B get allocation addr
+ 05AC				set_ro:		;1C set R/O
+ 05AC				get_ro_vect:	;1D get R/O vector
+ 05AC				set_file_attr:	;1E set file attrib
+ 05AC				get_DPB_addr:	;1F get DPB addr
+ 05AC				reset_disk2:	;25 reset disk by vector
+
+ 05AC  E9 FE82					jmp	bdos_no_error
+				;--------------------------------------
+ 05AF 05D1 R			bios_table	dw	bios_boot
+ 05B1  05D1 R					dw	bios_wboot
+ 05B3  05D6 R					dw	bios_const
+ 05B5  05E1 R					dw	bios_conin
+ 05B7  05E8 R					dw	bios_conout
+ 05B9  05FD R					dw	bios_list
+ 05BB  05FD R					dw	bios_punch
+ 05BD  05FD R					dw	bios_reader
+ 05BF  05FD R					dw	bios_home
+ 05C1  05FD R					dw	bios_seldsk
+ 05C3  05FD R					dw	bios_settrk
+ 05C5  05FD R					dw	bios_setsec
+ 05C7  05FD R					dw	bios_setdma
+ 05C9  05FD R					dw	bios_read
+ 05CB  05FD R					dw	bios_write
+ 05CD  05FD R					dw	bios_listst
+ 05CF  05FD R					dw	bios_sectran
+
+ 05D1				bios_boot:
+ 05D1  B8 4C00			bios_wboot:	mov	ax,4c00h
+ 05D4  CD 21					int	21h
+
+ 05D6  B8 4406			bios_const:	mov	ax,4406h
+ 05D9  BB 0001					mov	bx,1
+ 05DC  CD 21					int	21h
+ 05DE  E9 FDC7					jmp	go_cpm
+
+ 05E1  B4 07			bios_conin:	mov	ah,7
+ 05E3  CD 21					int	21h
+ 05E5  E9 FDC0					jmp	go_cpm
+
+ 05E8  B4 06			bios_conout:	mov	ah,6
+ 05EA  80 F9 FF					cmp	cl,0ffh
+ 05ED  74 07					je	bios_conout1
+ 05EF  8A D1					mov	dl,cl
+ 05F1  CD 21					int	21h
+ 05F3  E9 FDB2					jmp	go_cpm
+
+ 05F6  B2 00			bios_conout1:	mov	dl,00
+ 05F8  CD 21					int	21h
+ 05FA  E9 FDAB					jmp	go_cpm
+
+ 05FD				bios_list:
+ 05FD				bios_punch:
+ 05FD				bios_reader:
+ 05FD				bios_listst:
+ 05FD				bios_home:
+ 05FD				bios_seldsk:
+ 05FD				bios_settrk:
+ 05FD				bios_setsec:
+ 05FD				bios_setdma:
+ 05FD				bios_read:
+ 05FD				bios_write:
+ 05FD				bios_sectran:
+ 05FD  E9 FE2A					jmp	bios_no_error
+				;======================================
+ 0600 43 50 2F 4D 20 32		open_msg		db	'CP/M 2.2 player for generic MS-DOS and V20/30 Rev. 1.00',0dh,0ah
+       2E 32 20 70 6C 61
+       79 65 72 20 66 6F
+       72 20 67 65 6E 65
+       72 69 63 20 4D 53
+       2D 44 4F 53 20 61
+       6E 64 20 56 32 30
+       2F 33 30 20 52 65
+       76 2E 20 31 2E 30
+       30 0D 0A
+ 0639  43 6F 70 79 72 69				db	'Copyright (c) 2025 by Gazelle',0dh,0ah,0ah,24h
+       67 68 74 20 28 63
+       29 20 32 30 32 35
+       20 62 79 20 47 61
+       7A 65 6C 6C 65 0D
+       0A 0A 24
+ 065A 4E 6F 20 65 6E 6F		no_mem_msg		db	'No enough memory.$'
+       75 67 68 20 6D 65
+       6D 6F 72 79 2E 24
+ 066C 5A 38 30 45 4D 2E		em_open_error_msg	db	'Z80EM.BIN open error.$'
+       42 49 4E 20 6F 70
+       65 6E 20 65 72 72
+       6F 72 2E 24
+ 0682 5A 38 30 45 4D 2E		em_read_error_msg	db	'Z80EM.BIN read error.$'
+       42 49 4E 20 72 65
+       61 64 20 65 72 72
+       6F 72 2E 24
+ 0698 5A 38 30 45 4D 2E		em_close_error_msg	db	'Z80EM.BIN close error.$'
+       42 49 4E 20 63 6C
+       6F 73 65 20 65 72
+       72 6F 72 2E 24
+ 06AF 43 50 4D 20 66 69		cpm_open_error_msg	db	'CPM file open error.$'
+       6C 65 20 6F 70 65
+       6E 20 65 72 72 6F
+       72 2E 24
+ 06C4 43 50 4D 20 66 69		cpm_read_error_msg	db	'CPM file read error.$'
+       6C 65 20 72 65 61
+       64 20 65 72 72 6F
+       72 2E 24
+ 06D9 43 50 4D 20 66 69		cpm_close_error_msg	db	'CPM file close error.$'
+       6C 65 20 63 6C 6F
+       73 65 20 65 72 72
+       6F 72 2E 24
+ 06EF 74 6F 6F 20 6C 6F		too_long_path_msg	db	'too long path.$'
+       6E 67 20 70 61 74
+       68 2E 24
+ 06FE 74 6F 6F 20 6C 61		too_large_com_msg	db	'too large COM file.$'
+       72 67 65 20 43 4F
+       4D 20 66 69 6C 65
+       2E 24
+ 0712 5A 38 30 45 4D 2E		internal_error_msg	db	'Z80EM.BIN internal error.$'
+       42 49 4E 20 69 6E
+       74 65 72 6E 61 6C
+       20 65 72 72 6F 72
+       2E 24
+
+ 072C  BA 0698 R		em_close_error:	mov	dx,offset em_close_error_msg
+ 072F  EB 2D					jmp	error_exit
+ 0731  BA 066C R		em_open_error:	mov	dx,offset em_open_error_msg
+ 0734  EB 28					jmp	error_exit
+ 0736  BA 0682 R		em_read_error:	mov	dx,offset em_read_error_msg
+ 0739  EB 23					jmp	error_exit
+ 073B  BA 06D9 R		cpm_close_error:mov	dx,offset cpm_close_error_msg
+ 073E  EB 1E					jmp	error_exit
+ 0740  BA 06AF R		cpm_open_error:	mov	dx,offset cpm_open_error_msg
+ 0743  EB 19					jmp	error_exit
+ 0745  BA 06C4 R		cpm_read_error:	mov	dx,offset cpm_read_error_msg
+ 0748  EB 14					jmp	error_exit
+ 074A  BA 065A R		no_mem:		mov	dx,offset no_mem_msg
+ 074D  EB 0F					jmp	error_exit
+ 074F  BA 06EF R		too_long_path:	mov	dx,offset too_long_path_msg
+ 0752  EB 0A					jmp	error_exit
+ 0754  BA 06FE R		too_large_com:	mov	dx,offset too_large_com_msg
+ 0757  EB 05					jmp	error_exit
+ 0759				z80em_internal_error:
+ 0759  BA 0712 R				mov	dx,offset internal_error_msg
+ 075C  EB 00					jmp	error_exit
+
+ 075E				error_exit:
+ 075E  8C C8					mov	ax,cs
+ 0760  8E D8					mov	ds,ax
+ 0762  B4 09					mov	ah,9
+ 0764  CD 21					int	21h
+ 0766  B8 4C00					mov	ax,4c00h
+ 0769  CD 21					int	21h
+				;======================================
+
+ 076B  8C C8			search_env:	mov	ax,cs
+ 076D  8E C0					mov	es,ax
+ 076F  2E: A1 002C				mov	ax,cs:[002ch]
+ 0773  8E D8					mov	ds,ax
+ 0775  BE 0000					mov	si,0
+ 0778  FC					cld
+
+ 0779				search_env_next_4:
+ 0779  BB FFFF					mov	bx,0ffffh
+ 077C  BF 0127 R				mov	di,offset env_key
+ 077F  26: 8A 15				mov	dl,es:[di]
+ 0782  AC					lodsb
+ 0783				search_env_next_2:
+ 0783  3A C2					cmp	al,dl
+ 0785  74 18					je	search_env_match_1
+ 0787				search_env_next_3:
+ 0787  3C 00					cmp	al,0
+ 0789  74 09					je	search_env_next_5
+ 078B				search_env_next_1:
+ 078B  AC					lodsb
+ 078C  23 F6					and	si,si
+ 078E  74 3E					je	search_env_exit_1
+ 0790  3C 00					cmp	al,0
+ 0792  75 F7					jne	search_env_next_1
+ 0794				search_env_next_5:
+ 0794  AC					lodsb
+ 0795  23 F6					and	si,si
+ 0797  74 35					je	search_env_exit_1
+ 0799  3C 00					cmp	al,0
+ 079B  74 34					je	search_env_exit
+ 079D  EB E4					jmp	search_env_next_2
+
+ 079F				search_env_match_1:
+ 079F  8B DE					mov	bx,si
+ 07A1  4B					dec	bx
+
+ 07A2				search_env_match_3:
+ 07A2  AC					lodsb
+ 07A3  23 F6					and	si,si
+ 07A5  74 27					je	search_env_exit_1
+ 07A7  47					inc	di
+ 07A8  26: 8A 15				mov	dl,es:[di]
+ 07AB  3A C2					cmp	al,dl
+ 07AD  74 0B					je	search_env_match_2
+ 07AF				search_env_match_4:
+ 07AF  3C 00					cmp	al,0
+ 07B1  74 C6					je	search_env_next_4
+ 07B3  AC					lodsb
+ 07B4  23 F6					and	si,si
+ 07B6  74 16					je	search_env_exit_1
+ 07B8  EB F5					jmp	search_env_match_4
+ 07BA				search_env_match_2:
+ 07BA  3C 3D					cmp	al,'='
+ 07BC  75 E4					jne	search_env_match_3
+
+ 07BE  B9 0080					mov	cx,128
+ 07C1  BF 0137 R				mov	di,offset env_str
+ 07C4				search_env_get:
+ 07C4  AC					lodsb
+ 07C5  AA					stosb
+ 07C6  3C 00					cmp	al,0
+ 07C8  74 07					je	search_env_exit
+ 07CA  E2 F8					loop	search_env_get
+ 07CC  EB 00					jmp	search_env_exit_1
+
+ 07CE				search_env_exit_1:
+ 07CE  BB FFFF					mov	bx,0ffffh
+ 07D1				search_env_exit:
+ 07D1  8C C8					mov	ax,cs
+ 07D3  8E D8					mov	ds,ax
+ 07D5  C3					ret
+				;================================================
+
+ 07D6				read_emulator:
+ 07D6  8C C8					mov	ax,cs
+ 07D8  8E D8					mov	ds,ax
+ 07DA  8E C0					mov	es,ax
+ 07DC  B8 3D00					mov	ax,3d00h
+ 07DF  BA 012C R				mov	dx,offset em_file_name0		;search current dir
+				;		call	disp_file_name
+ 07E2  CD 21					int	21h
+ 07E4  73 36					jnc	read_em_4
+
+ 07E6  BE 0137 R				mov	si,offset env_str
+ 07E9  BF 01B7 R				mov	di,offset em_file_name
+ 07EC  FC					cld
+ 07ED  AC					lodsb
+ 07EE  22 C0					and	al,al
+ 07F0  75 03					jnz	read_em_31
+ 07F2  E9 FF3C					jmp	em_open_error
+ 07F5				read_em_31:
+ 07F5  AA					stosb
+ 07F6  B9 0075					mov	cx,117
+ 07F9				read_em_1:
+ 07F9  AC					lodsb
+ 07FA  22 C0					and	al,al
+ 07FC  74 06					jz	read_em_2
+ 07FE  AA					stosb
+ 07FF  E2 F8					loop	read_em_1
+ 0801  E9 FF4B					jmp	too_long_path
+ 0804				read_em_2:
+ 0804  B0 5C					mov	al,'\'
+ 0806  AA					stosb
+ 0807				read_em_3:
+ 0807  BE 012C R				mov	si,offset em_file_name0
+ 080A  B9 000B					mov	cx,offset em_file_name0_end - offset em_file_name0
+ 080D  F3/ A4					rep	movsb
+
+ 080F  B8 3D00					mov	ax,3d00h
+ 0812  BA 01B7 R				mov	dx,offset em_file_name
+				;		call	disp_file_name
+ 0815  CD 21					int	21h
+ 0817  73 03					jnc	read_em_4
+ 0819  E9 FF15					jmp	em_open_error
+ 081C				read_em_4:
+ 081C  2E: A3 0110 R				mov	em_file_handle,ax
+ 0820  8B D8					mov	bx,ax
+ 0822  B4 3F					mov	ah,3fh
+ 0824  B9 FFFF					mov	cx,0ffffh
+ 0827  2E: 8E 1E 03BC R				mov	ds,em_seg
+ 082C  BA 0000					mov	dx,0
+ 082F  CD 21					int	21h
+ 0831  73 03					jnc	read_em_5
+ 0833  E9 FF00					jmp	em_read_error
+ 0836				read_em_5:
+ 0836  8C C8					mov	ax,cs
+ 0838  8E D8					mov	ds,ax
+ 083A  B4 3E					mov	ah,3eh
+ 083C  2E: 8B 1E 0110 R				mov	bx,em_file_handle
+ 0841  CD 21					int	21h
+ 0843  73 03					jnc	read_em_exit
+ 0845  E9 FEE4					jmp	em_close_error
+ 0848				read_em_exit:
+ 0848  8C C8					mov	ax,cs
+ 084A  8E D8					mov	ds,ax
+ 084C  8E C0					mov	es,ax
+ 084E  C3					ret
+				;================================================
+ 084F				read_cpm_file:
+ 084F				read_cpm_00:
+ 084F  BF 0237 R				mov	di,offset cpm_file_name
+ 0852				read_cpm_0:
+ 0852  BE 0081					mov	si,81h
+ 0855  8A 0E 0080				mov	cl,ds:[80h]
+ 0859  B5 00					mov	ch,0
+ 085B  AC			read_cpm_01:	lodsb
+ 085C  3C 20					cmp	al,' '
+ 085E  74 FB					je	read_cpm_01
+ 0860  3C 09					cmp	al,09h
+ 0862  74 F7					je	read_cpm_01
+ 0864  4E					dec	si
+
+ 0865  AC			read_cpm_02:	lodsb
+ 0866  3C 20					cmp	al,' '
+ 0868  74 39					je	read_cpm_03
+ 086A  3C 0D					cmp	al,0dh
+ 086C  74 35					je	read_cpm_03
+ 086E  3C 00					cmp	al,0
+ 0870  74 31					je	read_cpm_03
+ 0872  3C 09					cmp	al,09h
+ 0874  74 2D					je	read_cpm_03
+ 0876  3C 3A					cmp	al,':'
+ 0878  75 1A					jne	read_cpm_04
+ 087A  80 FC 41					cmp	ah,'A'
+ 087D  72 15					jb	read_cpm_04
+ 087F  80 FC 5A					cmp	ah,'Z'
+ 0882  76 0A					jbe	read_cpm_06
+ 0884  80 FC 7A					cmp	ah,'z'
+ 0887  77 0B					ja	read_cpm_04
+ 0889  80 FC 61					cmp	ah,'a'
+ 088C  72 06					jb	read_cpm_04
+ 088E  2E: C6 06 011A R		read_cpm_06:	mov	drv_flag,1
+       01
+ 0894  3C 5C			read_cpm_04:	cmp	al,'\'
+ 0896  75 06					jne	read_cpm_05
+ 0898  2E: C6 06 0118 R				mov	path_flag,1
+       01
+ 089E  AA			read_cpm_05:	stosb
+ 089F  8A E0					mov	ah,al
+ 08A1  E2 C2					loop	read_cpm_02
+
+ 08A3  4E			read_cpm_03:	dec	si
+ 08A4  2E: 89 36 0114 R				mov	cpm_arg_offset,si
+ 08A9  2E: 89 3E 011B R				mov	file_name_end,di
+
+ 08AE  4E					dec	si
+ 08AF  B9 0004					mov	cx,4
+ 08B2  FD			read_cpm_08:	std
+ 08B3  AC					lodsb
+ 08B4  3C 2E					cmp	al,'.'
+ 08B6  74 25					je	read_cpm_09
+ 08B8  E2 F8					loop	read_cpm_08
+
+ 08BA  2E: 8B 3E 011B R				mov	di,file_name_end
+ 08BF  BE 0122 R				mov	si,offset cpm_str
+ 08C2  FC					cld
+ 08C3  A5					movsw
+ 08C4  A5					movsw
+ 08C5  A4					movsb
+
+ 08C6  B8 3D00					mov	ax,3d00h
+ 08C9  BA 0237 R				mov	dx,offset cpm_file_name
+				;		call	disp_file_name
+ 08CC  CD 21					int	21h
+ 08CE  72 02					jc	read_cpm_10
+ 08D0  EB 5E					jmp	read_cpm_6
+
+ 08D2  2E: 8B 3E 011B R		read_cpm_10:	mov	di,file_name_end
+ 08D7  BE 011D R				mov	si,offset com_str
+ 08DA  FC					cld
+ 08DB  A5					movsw
+ 08DC  A5					movsw
+ 08DD				read_cpm_09:
+ 08DD  B0 00					mov	al,0
+ 08DF  AA					stosb
+ 08E0  B8 3D00					mov	ax,3d00h
+ 08E3  BA 0237 R				mov	dx,offset cpm_file_name
+				;		call	disp_file_name
+ 08E6  CD 21					int	21h
+ 08E8  72 02					jc	read_cpm_11
+ 08EA  EB 44					jmp	read_cpm_6
+ 08EC				read_cpm_11:
+ 08EC  2E: 80 3E 0119 R				cmp	env_flag,1
+       01
+ 08F2  74 12					je	read_cpm_111
+ 08F4  2E: 80 3E 011A R				cmp	drv_flag,1
+       01
+ 08FA  74 0A					je	read_cpm_111
+ 08FC  2E: 80 3E 0118 R				cmp	path_flag,1
+       01
+ 0902  74 02					je	read_cpm_111
+ 0904  EB 03					jmp	read_cpm_12
+ 0906				read_cpm_111:
+ 0906  E9 FE37					jmp	cpm_open_error
+
+ 0909  2E: C6 06 0119 R		read_cpm_12:	mov	env_flag,1
+       01
+ 090F  BE 0137 R				mov	si,offset env_str
+ 0912  BF 0237 R				mov	di,offset cpm_file_name
+ 0915  FC					cld
+ 0916  AC					lodsb
+ 0917  22 C0					and	al,al
+ 0919  74 EB					jz	read_cpm_111
+ 091B  AA					stosb
+ 091C  B9 007F					mov	cx,127
+ 091F				read_cpm_1:
+ 091F  AC					lodsb
+ 0920  22 C0					and	al,al
+ 0922  74 06					jz	read_cpm_2
+ 0924  AA					stosb
+ 0925  E2 F8					loop	read_cpm_1
+ 0927  E9 FE25					jmp	too_long_path
+ 092A				read_cpm_2:
+ 092A  B0 5C					mov	al,'\'
+ 092C  AA					stosb
+ 092D				read_cpm_3:
+ 092D  E9 FF22					jmp	read_cpm_0
+
+ 0930				read_cpm_6:
+ 0930  2E: A3 0112 R				mov	cpm_file_handle,ax
+ 0934  8B D8					mov	bx,ax
+ 0936  B4 3F					mov	ah,3fh
+ 0938  B9 FE00					mov	cx,0fe00h
+ 093B  2E: 8E 1E 010E R				mov	ds,z80_seg
+ 0940  BA 0100					mov	dx,100h
+ 0943  CD 21					int	21h
+ 0945  73 03					jnc	read_cpm_7
+ 0947  E9 FDFB					jmp	cpm_read_error
+ 094A				read_cpm_7:
+ 094A  23 C0					and	ax,ax
+ 094C  75 03					jnz	read_cpm_71
+ 094E  E9 FDF4					jmp	cpm_read_error
+ 0951				read_cpm_71:
+ 0951  3D FE00					cmp	ax,0fe00h
+ 0954  75 03					jne	read_cpm_8
+ 0956  E9 FDFB					jmp	too_large_com
+ 0959				read_cpm_8:
+ 0959  8C C8					mov	ax,cs
+ 095B  8E D8					mov	ds,ax
+ 095D  B4 3E					mov	ah,3eh
+ 095F  2E: 8B 1E 0112 R				mov	bx,cpm_file_handle
+ 0964  CD 21					int	21h
+ 0966  73 03					jnc	read_cpm_exit
+ 0968  E9 FDD0					jmp	cpm_close_error
+ 096B				read_cpm_exit:
+ 096B  C3					ret
+				;================================================
+ 096C				setup_cpm_area:
+ 096C  2E: 8E 06 010E R				mov	es,z80_seg
+ 0971  BF 0000					mov	di,0
+ 0974  B9 0080					mov	cx,80h
+ 0977  B8 0000					mov	ax,0
+ 097A  F3/ AB					rep	stosw
+
+ 097C  2E: 8B 36 0114 R				mov	si,cpm_arg_offset
+ 0981  BF 0080					mov	di,80h
+ 0984  8A 0D					mov	cl,ds:[di]
+ 0986  B5 00					mov	ch,0
+ 0988  81 C1 0081				add	cx,81h
+ 098C  2B CE					sub	cx,si
+ 098E  76 18					jbe	set_cpm_11
+
+ 0990  8A C1					mov	al,cl
+ 0992  FC					cld
+ 0993  AA					stosb
+ 0994  83 E1 7F					and	cx,7fh
+
+ 0997  AC			set_cpm_loop:	lodsb
+ 0998  3C 60					cmp	al,60h
+ 099A  76 06					jbe	set_cpm_10
+ 099C  3C 7B					cmp	al,7bh
+ 099E  73 02					jae	set_cpm_10
+ 09A0  2C 20					sub	al,20h
+ 09A2  AA			set_cpm_10:	stosb
+ 09A3  E2 F2					loop	set_cpm_loop
+ 09A5  B0 00					mov	al,0
+ 09A7  AA					stosb
+ 09A8				set_cpm_11:
+ 09A8  2E: 8B 36 0114 R				mov	si,cpm_arg_offset
+
+ 09AD  BF 005C					mov	di,5ch
+ 09B0  B8 2901					mov	ax,2901h
+ 09B3  CD 21					int	21h
+
+ 09B5  BF 006C					mov	di,6ch
+ 09B8  B8 2901					mov	ax,2901h
+ 09BB  CD 21					int	21h
+
+ 09BD  8C C8					mov	ax,cs
+ 09BF  8E D8					mov	ds,ax
+ 09C1  2E: 8E 06 010E R				mov	es,z80_seg
+ 09C6  BE 09F9 R				mov	si,OFFSET CPM_zero_page_0
+ 09C9  BF 0000					mov	di,0
+ 09CC  A5					movsw
+ 09CD  A5					movsw
+ 09CE  A5					movsw
+ 09CF  A5					movsw
+
+ 09D0  BF FF84					mov	di,CPM_BDOS
+ 09D3  BE 0A01 R				mov	si,offset CPM_BDOS_code
+ 09D6  B9 0004					mov	cx,CPM_BDOS_end - CPM_BDOS_code
+ 09D9  F3/ A4					rep	movsb
+
+ 09DB  BF FF88					mov	di,CPM_BIOS
+ 09DE  BE 0A05 R				mov	si,offset CPM_BIOS_code
+ 09E1  B9 0073					mov	cx,CPM_BIOS_end - CPM_BIOS_code
+ 09E4  F3/ A4					rep	movsb
+
+ 09E6  26: 8C 06 0010				mov	es:[10h],es
+ 09EB  26: 8C 0E 0014				mov	es:[14h],cs
+ 09F0  2E: A1 03BC R				mov	ax,EM_SEG
+ 09F4  26: A3 0012				mov	es:[12h],ax
+
+ 09F8  C3					ret
+				;------------------------------------------------
+				;	CPM	memory image
+
+ = FF84				CPM_BDOS	equ	0ff84h
+ = FF88				CPM_BIOS	equ	0ff88h
+
+				JP80		macro	addr
+						db	0c3h		;JP instruction for Z80
+						dw	addr - CPM_BIOS_code + CPM_BIOS
+						endm
+
+				BIOS80		macro	bios_code
+						db	03eh,bios_code	;LD A,bios_code
+						db	0edh,0fdh	;RETEM
+						endm
+
+ 09F9 C3			CPM_zero_page_0	db	0c3h
+ 09FA  FF8B					dw	CPM_BIOS+3
+ 09FC 00			io_byte		db	0
+ 09FD 02			login_disk	db	2
+ 09FE C3			jmp_bdos	db	0c3h
+ 09FF  FF84					dw	CPM_BDOS
+
+ 0A01				CPM_BDOS_code:
+ 0A01  3E 00					db	03eh,00		;LD A,0
+ 0A03  ED FD					db	0edh,0fdh	;RETEM
+ 0A05				CPM_BDOS_end:
+
+ 0A05				CPM_BIOS_code:
+						JP80	bios80_1
+ 0A05  C3		     1			db	0c3h		;JP instruction for Z80
+ 0A06  FFBB		     1			dw	bios80_1 - CPM_BIOS_code + CPM_BIOS
+						JP80	bios80_1
+ 0A08  C3		     1			db	0c3h		;JP instruction for Z80
+ 0A09  FFBB		     1			dw	bios80_1 - CPM_BIOS_code + CPM_BIOS
+						JP80	bios80_2
+ 0A0B  C3		     1			db	0c3h		;JP instruction for Z80
+ 0A0C  FFBF		     1			dw	bios80_2 - CPM_BIOS_code + CPM_BIOS
+						JP80	bios80_3
+ 0A0E  C3		     1			db	0c3h		;JP instruction for Z80
+ 0A0F  FFC3		     1			dw	bios80_3 - CPM_BIOS_code + CPM_BIOS
+						JP80	bios80_4
+ 0A11  C3		     1			db	0c3h		;JP instruction for Z80
+ 0A12  FFC7		     1			dw	bios80_4 - CPM_BIOS_code + CPM_BIOS
+						JP80	bios80_5
+ 0A14  C3		     1			db	0c3h		;JP instruction for Z80
+ 0A15  FFCB		     1			dw	bios80_5 - CPM_BIOS_code + CPM_BIOS
+						JP80	bios80_6
+ 0A17  C3		     1			db	0c3h		;JP instruction for Z80
+ 0A18  FFCF		     1			dw	bios80_6 - CPM_BIOS_code + CPM_BIOS
+						JP80	bios80_7
+ 0A1A  C3		     1			db	0c3h		;JP instruction for Z80
+ 0A1B  FFD3		     1			dw	bios80_7 - CPM_BIOS_code + CPM_BIOS
+						JP80	bios80_8
+ 0A1D  C3		     1			db	0c3h		;JP instruction for Z80
+ 0A1E  FFD7		     1			dw	bios80_8 - CPM_BIOS_code + CPM_BIOS
+						JP80	bios80_9
+ 0A20  C3		     1			db	0c3h		;JP instruction for Z80
+ 0A21  FFDB		     1			dw	bios80_9 - CPM_BIOS_code + CPM_BIOS
+						JP80	bios80_10
+ 0A23  C3		     1			db	0c3h		;JP instruction for Z80
+ 0A24  FFDF		     1			dw	bios80_10 - CPM_BIOS_code + CPM_BIOS
+						JP80	bios80_11
+ 0A26  C3		     1			db	0c3h		;JP instruction for Z80
+ 0A27  FFE3		     1			dw	bios80_11 - CPM_BIOS_code + CPM_BIOS
+						JP80	bios80_12
+ 0A29  C3		     1			db	0c3h		;JP instruction for Z80
+ 0A2A  FFE7		     1			dw	bios80_12 - CPM_BIOS_code + CPM_BIOS
+						JP80	bios80_13
+ 0A2C  C3		     1			db	0c3h		;JP instruction for Z80
+ 0A2D  FFEB		     1			dw	bios80_13 - CPM_BIOS_code + CPM_BIOS
+						JP80	bios80_14
+ 0A2F  C3		     1			db	0c3h		;JP instruction for Z80
+ 0A30  FFEF		     1			dw	bios80_14 - CPM_BIOS_code + CPM_BIOS
+						JP80	bios80_15
+ 0A32  C3		     1			db	0c3h		;JP instruction for Z80
+ 0A33  FFF3		     1			dw	bios80_15 - CPM_BIOS_code + CPM_BIOS
+						JP80	bios80_16
+ 0A35  C3		     1			db	0c3h		;JP instruction for Z80
+ 0A36  FFF7		     1			dw	bios80_16 - CPM_BIOS_code + CPM_BIOS
+
+ 0A38				bios80_1:	BIOS80	1
+ 0A38  3E 01		     1			db	03eh,1	;LD A,bios_code
+ 0A3A  ED FD		     1			db	0edh,0fdh	;RETEM
+ 0A3C				bios80_2:	BIOS80	2
+ 0A3C  3E 02		     1			db	03eh,2	;LD A,bios_code
+ 0A3E  ED FD		     1			db	0edh,0fdh	;RETEM
+ 0A40				bios80_3:	BIOS80	3
+ 0A40  3E 03		     1			db	03eh,3	;LD A,bios_code
+ 0A42  ED FD		     1			db	0edh,0fdh	;RETEM
+ 0A44				bios80_4:	BIOS80	4
+ 0A44  3E 04		     1			db	03eh,4	;LD A,bios_code
+ 0A46  ED FD		     1			db	0edh,0fdh	;RETEM
+ 0A48				bios80_5:	BIOS80	5
+ 0A48  3E 05		     1			db	03eh,5	;LD A,bios_code
+ 0A4A  ED FD		     1			db	0edh,0fdh	;RETEM
+ 0A4C				bios80_6:	BIOS80	6
+ 0A4C  3E 06		     1			db	03eh,6	;LD A,bios_code
+ 0A4E  ED FD		     1			db	0edh,0fdh	;RETEM
+ 0A50				bios80_7:	BIOS80	7
+ 0A50  3E 07		     1			db	03eh,7	;LD A,bios_code
+ 0A52  ED FD		     1			db	0edh,0fdh	;RETEM
+ 0A54				bios80_8:	BIOS80	8
+ 0A54  3E 08		     1			db	03eh,8	;LD A,bios_code
+ 0A56  ED FD		     1			db	0edh,0fdh	;RETEM
+ 0A58				bios80_9:	BIOS80	9
+ 0A58  3E 09		     1			db	03eh,9	;LD A,bios_code
+ 0A5A  ED FD		     1			db	0edh,0fdh	;RETEM
+ 0A5C				bios80_10:	BIOS80	10
+ 0A5C  3E 0A		     1			db	03eh,10	;LD A,bios_code
+ 0A5E  ED FD		     1			db	0edh,0fdh	;RETEM
+ 0A60				bios80_11:	BIOS80	11
+ 0A60  3E 0B		     1			db	03eh,11	;LD A,bios_code
+ 0A62  ED FD		     1			db	0edh,0fdh	;RETEM
+ 0A64				bios80_12:	BIOS80	12
+ 0A64  3E 0C		     1			db	03eh,12	;LD A,bios_code
+ 0A66  ED FD		     1			db	0edh,0fdh	;RETEM
+ 0A68				bios80_13:	BIOS80	13
+ 0A68  3E 0D		     1			db	03eh,13	;LD A,bios_code
+ 0A6A  ED FD		     1			db	0edh,0fdh	;RETEM
+ 0A6C				bios80_14:	BIOS80	14
+ 0A6C  3E 0E		     1			db	03eh,14	;LD A,bios_code
+ 0A6E  ED FD		     1			db	0edh,0fdh	;RETEM
+ 0A70				bios80_15:	BIOS80	15
+ 0A70  3E 0F		     1			db	03eh,15	;LD A,bios_code
+ 0A72  ED FD		     1			db	0edh,0fdh	;RETEM
+ 0A74				bios80_16:	BIOS80	16
+ 0A74  3E 10		     1			db	03eh,16	;LD A,bios_code
+ 0A76  ED FD		     1			db	0edh,0fdh	;RETEM
+
+ 0A78				CPM_bios_end:
+				;======================================
+ 0A78  52			dsphex4:	push	dx
+ 0A79  8B D0					mov	dx,ax
+ 0A7B  8A C4					mov	al,ah
+ 0A7D  E8 0003					call	dsphex2
+ 0A80  8B C2					mov	ax,dx
+ 0A82  5A					pop	dx
+
+ 0A83  52			dsphex2:	push	dx
+ 0A84  8A D0					mov	dl,al
+ 0A86  D0 E8					shr	al,1
+ 0A88  D0 E8					shr	al,1
+ 0A8A  D0 E8					shr	al,1
+ 0A8C  D0 E8					shr	al,1
+ 0A8E  E8 0003					call	dsphex1
+ 0A91  8A C2					mov	al,dl
+ 0A93  5A					pop	dx
+
+ 0A94  52			dsphex1:	push	dx
+ 0A95  24 0F					and	al,0fh
+ 0A97  3C 09					cmp	al,9
+ 0A99  76 02					jbe	dsphex1_1
+ 0A9B  04 07					add	al,'@'-'9'
+ 0A9D  04 30			dsphex1_1:	add	al,'0'
+ 0A9F  8A D0					mov	dl,al
+ 0AA1  B4 02					mov	ah,2
+ 0AA3  CD 21					int	21h
+ 0AA5  5A					pop	dx
+ 0AA6  C3					ret
+				;======================================
+ 0AA7				disp_file_name:
+ 0AA7  50					push	ax
+ 0AA8  51					push	cx
+ 0AA9  52					push	dx
+ 0AAA  56					push	si
+ 0AAB  8B F2					mov	si,dx
+ 0AAD  FC					cld
+ 0AAE  B9 0080					mov	cx,128
+ 0AB1				disp_file_name_loop:
+ 0AB1  AC					lodsb
+ 0AB2  3C 00					cmp	al,0
+ 0AB4  74 08					je	disp_file_name_exit
+ 0AB6  8A D0					mov	dl,al
+ 0AB8  B4 02					mov	ah,2
+ 0ABA  CD 21					int	21h
+ 0ABC  E2 F3					loop	disp_file_name_loop
+ 0ABE				disp_file_name_exit:
+ 0ABE  B2 0D					mov	dl,0dh
+ 0AC0  B4 02					mov	ah,02
+ 0AC2  CD 21					int	21h
+ 0AC4  B2 0A					mov	dl,0ah
+ 0AC6  B4 02					mov	ah,2
+ 0AC8  CD 21					int	21h
+ 0ACA  5E					pop	si
+ 0ACB  5A					pop	dx
+ 0ACC  59					pop	cx
+ 0ACD  58					pop	ax
+ 0ACE  C3					ret
+				;======================================
+					end	start
+ 
+Microsoft (R) Macro Assembler Version 6.00AD    	    09/21/25 12:54:36
+z80v.asm						     Symbols 2 - 1
+
+
+
+
+Macros:
+
+                N a m e                 Type
+
+BIOS80 . . . . . . . . . . . . .	Proc
+JP80 . . . . . . . . . . . . . .	Proc
+
+
+Segments and Groups:
+
+                N a m e                 Size     Length   Align   Combine Class
+
+DGROUP . . . . . . . . . . . . .	GROUP
+_TEXT  . . . . . . . . . . . . .	16 Bit	 0ACF	  Word	  Public  'CODE'	
+_DATA  . . . . . . . . . . . . .	16 Bit	 0000	  Word	  Public  'DATA'	
+
+
+Symbols:
+
+                N a m e                 Type     Value    Attr
+
+@CodeSize  . . . . . . . . . . .	Number	 0000h	 
+@DataSize  . . . . . . . . . . .	Number	 0000h	 
+@Interface . . . . . . . . . . .	Number	 0000h	 
+@Model . . . . . . . . . . . . .	Number	 0001h	 
+@code  . . . . . . . . . . . . .	Text   	 DGROUP
+@data  . . . . . . . . . . . . .	Text   	 DGROUP
+@fardata?  . . . . . . . . . . .	Text   	 FAR_BSS
+@fardata . . . . . . . . . . . .	Text   	 FAR_DATA
+@stack . . . . . . . . . . . . .	Text   	 DGROUP
+BDOS_no_error  . . . . . . . . .	L Near	 0431	  _TEXT	
+BIOS_no_error  . . . . . . . . .	L Near	 042A	  _TEXT	
+CPM_BDOS_code  . . . . . . . . .	L Near	 0A01	  _TEXT	
+CPM_BDOS_end . . . . . . . . . .	L Near	 0A05	  _TEXT	
+CPM_BDOS . . . . . . . . . . . .	Number	 FF84h	 
+CPM_BIOS_code  . . . . . . . . .	L Near	 0A05	  _TEXT	
+CPM_BIOS . . . . . . . . . . . .	Number	 FF88h	 
+CPM_bios_end . . . . . . . . . .	L Near	 0A78	  _TEXT	
+CPM_zero_page_0  . . . . . . . .	Byte	 09F9	  _TEXT	
+EM_SEG . . . . . . . . . . . . .	Word	 03BC	  _TEXT	
+Z80_error  . . . . . . . . . . .	L Near	 0470	  _TEXT	
+Z80em_error_msg  . . . . . . . .	Byte	 0469	  _TEXT	
+Z80em_undef_msg  . . . . . . . .	Byte	 0446	  _TEXT	
+Z80em_unexec_msg . . . . . . . .	Byte	 0456	  _TEXT	
+bdos_bios_em_err . . . . . . . .	L Near	 0434	  _TEXT	
+bdos_const . . . . . . . . . . .	L Near	 054F	  _TEXT	
+bdos_no_error_msg  . . . . . . .	Byte	 03FE	  _TEXT	
+bdos_noready . . . . . . . . . .	L Near	 055C	  _TEXT	
+bdos_punch . . . . . . . . . . .	L Near	 05AC	  _TEXT	
+bdos_read_exit . . . . . . . . .	L Near	 0594	  _TEXT	
+bdos_reader  . . . . . . . . . .	L Near	 05AC	  _TEXT	
+bdos_read  . . . . . . . . . . .	L Near	 058A	  _TEXT	
+bdos_table . . . . . . . . . . .	Word	 04F6	  _TEXT	
+bios80_10  . . . . . . . . . . .	L Near	 0A5C	  _TEXT	
+bios80_11  . . . . . . . . . . .	L Near	 0A60	  _TEXT	
+bios80_12  . . . . . . . . . . .	L Near	 0A64	  _TEXT	
+bios80_13  . . . . . . . . . . .	L Near	 0A68	  _TEXT	
+bios80_14  . . . . . . . . . . .	L Near	 0A6C	  _TEXT	
+bios80_15  . . . . . . . . . . .	L Near	 0A70	  _TEXT	
+bios80_16  . . . . . . . . . . .	L Near	 0A74	  _TEXT	
+bios80_1 . . . . . . . . . . . .	L Near	 0A38	  _TEXT	
+bios80_2 . . . . . . . . . . . .	L Near	 0A3C	  _TEXT	
+bios80_3 . . . . . . . . . . . .	L Near	 0A40	  _TEXT	
+bios80_4 . . . . . . . . . . . .	L Near	 0A44	  _TEXT	
+bios80_5 . . . . . . . . . . . .	L Near	 0A48	  _TEXT	
+bios80_6 . . . . . . . . . . . .	L Near	 0A4C	  _TEXT	
+bios80_7 . . . . . . . . . . . .	L Near	 0A50	  _TEXT	
+bios80_8 . . . . . . . . . . . .	L Near	 0A54	  _TEXT	
+bios80_9 . . . . . . . . . . . .	L Near	 0A58	  _TEXT	
+bios_boot  . . . . . . . . . . .	L Near	 05D1	  _TEXT	
+bios_conin . . . . . . . . . . .	L Near	 05E1	  _TEXT	
+bios_conout1 . . . . . . . . . .	L Near	 05F6	  _TEXT	
+bios_conout  . . . . . . . . . .	L Near	 05E8	  _TEXT	
+bios_const . . . . . . . . . . .	L Near	 05D6	  _TEXT	
+bios_home  . . . . . . . . . . .	L Near	 05FD	  _TEXT	
+bios_listst  . . . . . . . . . .	L Near	 05FD	  _TEXT	
+bios_list  . . . . . . . . . . .	L Near	 05FD	  _TEXT	
+bios_no_error_msg  . . . . . . .	Byte	 0414	  _TEXT	
+bios_punch . . . . . . . . . . .	L Near	 05FD	  _TEXT	
+bios_reader  . . . . . . . . . .	L Near	 05FD	  _TEXT	
+bios_read  . . . . . . . . . . .	L Near	 05FD	  _TEXT	
+bios_sectran . . . . . . . . . .	L Near	 05FD	  _TEXT	
+bios_seldsk  . . . . . . . . . .	L Near	 05FD	  _TEXT	
+bios_setdma  . . . . . . . . . .	L Near	 05FD	  _TEXT	
+bios_setsec  . . . . . . . . . .	L Near	 05FD	  _TEXT	
+bios_settrk  . . . . . . . . . .	L Near	 05FD	  _TEXT	
+bios_table . . . . . . . . . . .	Word	 05AF	  _TEXT	
+bios_wboot . . . . . . . . . . .	L Near	 05D1	  _TEXT	
+bios_write . . . . . . . . . . .	L Near	 05FD	  _TEXT	
+buffer_area  . . . . . . . . . .	Byte	 02B7	  _TEXT	
+com_str  . . . . . . . . . . . .	Byte	 011D	  _TEXT	
+cpm_arg_offset . . . . . . . . .	Word	 0114	  _TEXT	
+cpm_close_error_msg  . . . . . .	Byte	 06D9	  _TEXT	
+cpm_close_error  . . . . . . . .	L Near	 073B	  _TEXT	
+cpm_file_handle  . . . . . . . .	Word	 0112	  _TEXT	
+cpm_file_name  . . . . . . . . .	Byte	 0237	  _TEXT	
+cpm_open_error_msg . . . . . . .	Byte	 06AF	  _TEXT	
+cpm_open_error . . . . . . . . .	L Near	 0740	  _TEXT	
+cpm_read_error_msg . . . . . . .	Byte	 06C4	  _TEXT	
+cpm_read_error . . . . . . . . .	L Near	 0745	  _TEXT	
+cpm_str  . . . . . . . . . . . .	Byte	 0122	  _TEXT	
+disp_file_name_exit  . . . . . .	L Near	 0ABE	  _TEXT	
+disp_file_name_loop  . . . . . .	L Near	 0AB1	  _TEXT	
+disp_file_name . . . . . . . . .	L Near	 0AA7	  _TEXT	
+drv_flag . . . . . . . . . . . .	Byte	 011A	  _TEXT	
+dsphex1_1  . . . . . . . . . . .	L Near	 0A9D	  _TEXT	
+dsphex1  . . . . . . . . . . . .	L Near	 0A94	  _TEXT	
+dsphex2  . . . . . . . . . . . .	L Near	 0A83	  _TEXT	
+dsphex4  . . . . . . . . . . . .	L Near	 0A78	  _TEXT	
+em_close_error_msg . . . . . . .	Byte	 0698	  _TEXT	
+em_close_error . . . . . . . . .	L Near	 072C	  _TEXT	
+em_file_handle . . . . . . . . .	Word	 0110	  _TEXT	
+em_file_name0_end  . . . . . . .	L Near	 0137	  _TEXT	
+em_file_name0  . . . . . . . . .	Byte	 012C	  _TEXT	
+em_file_name . . . . . . . . . .	Byte	 01B7	  _TEXT	
+em_open_error_msg  . . . . . . .	Byte	 066C	  _TEXT	
+em_open_error  . . . . . . . . .	L Near	 0731	  _TEXT	
+em_read_error_msg  . . . . . . .	Byte	 0682	  _TEXT	
+em_read_error  . . . . . . . . .	L Near	 0736	  _TEXT	
+em_seg_even  . . . . . . . . . .	L Near	 0360	  _TEXT	
+entry_SP . . . . . . . . . . . .	Text   	 bp
+env_flag . . . . . . . . . . . .	Byte	 0119	  _TEXT	
+env_key  . . . . . . . . . . . .	Byte	 0127	  _TEXT	
+env_str  . . . . . . . . . . . .	Byte	 0137	  _TEXT	
+error_exit . . . . . . . . . . .	L Near	 075E	  _TEXT	
+fcb_addr . . . . . . . . . . . .	Word	 0116	  _TEXT	
+file_name_end  . . . . . . . . .	Word	 011B	  _TEXT	
+file_search1 . . . . . . . . . .	L Near	 0572	  _TEXT	
+file_search2 . . . . . . . . . .	L Near	 057E	  _TEXT	
+get_DPB_addr . . . . . . . . . .	L Near	 05AC	  _TEXT	
+get_alloc_addr . . . . . . . . .	L Near	 05AC	  _TEXT	
+get_io_byte  . . . . . . . . . .	L Near	 055F	  _TEXT	
+get_login_vect . . . . . . . . .	L Near	 05AC	  _TEXT	
+get_ro_vect  . . . . . . . . . .	L Near	 05AC	  _TEXT	
+get_set_user . . . . . . . . . .	L Near	 0597	  _TEXT	
+get_version  . . . . . . . . . .	L Near	 056C	  _TEXT	
+go_cpm . . . . . . . . . . . . .	L Near	 03A8	  _TEXT	
+hajime . . . . . . . . . . . . .	L Near	 0337	  _TEXT	
+int_no . . . . . . . . . . . . .	Number	 00FFh	 
+internal_error_msg . . . . . . .	Byte	 0712	  _TEXT	
+io_byte  . . . . . . . . . . . .	Byte	 09FC	  _TEXT	
+jmp_bdos . . . . . . . . . . . .	Byte	 09FE	  _TEXT	
+login_disk . . . . . . . . . . .	Byte	 09FD	  _TEXT	
+main_read_emulator . . . . . . .	L Near	 0350	  _TEXT	
+no_mem_msg . . . . . . . . . . .	Byte	 065A	  _TEXT	
+no_mem . . . . . . . . . . . . .	L Near	 074A	  _TEXT	
+no_op  . . . . . . . . . . . . .	L Near	 03A8	  _TEXT	
+open_msg . . . . . . . . . . . .	Byte	 0600	  _TEXT	
+path_flag  . . . . . . . . . . .	Byte	 0118	  _TEXT	
+read_cpm_00  . . . . . . . . . .	L Near	 084F	  _TEXT	
+read_cpm_01  . . . . . . . . . .	L Near	 085B	  _TEXT	
+read_cpm_02  . . . . . . . . . .	L Near	 0865	  _TEXT	
+read_cpm_03  . . . . . . . . . .	L Near	 08A3	  _TEXT	
+read_cpm_04  . . . . . . . . . .	L Near	 0894	  _TEXT	
+read_cpm_05  . . . . . . . . . .	L Near	 089E	  _TEXT	
+read_cpm_06  . . . . . . . . . .	L Near	 088E	  _TEXT	
+read_cpm_08  . . . . . . . . . .	L Near	 08B2	  _TEXT	
+read_cpm_09  . . . . . . . . . .	L Near	 08DD	  _TEXT	
+read_cpm_0 . . . . . . . . . . .	L Near	 0852	  _TEXT	
+read_cpm_10  . . . . . . . . . .	L Near	 08D2	  _TEXT	
+read_cpm_111 . . . . . . . . . .	L Near	 0906	  _TEXT	
+read_cpm_11  . . . . . . . . . .	L Near	 08EC	  _TEXT	
+read_cpm_12  . . . . . . . . . .	L Near	 0909	  _TEXT	
+read_cpm_1 . . . . . . . . . . .	L Near	 091F	  _TEXT	
+read_cpm_2 . . . . . . . . . . .	L Near	 092A	  _TEXT	
+read_cpm_3 . . . . . . . . . . .	L Near	 092D	  _TEXT	
+read_cpm_6 . . . . . . . . . . .	L Near	 0930	  _TEXT	
+read_cpm_71  . . . . . . . . . .	L Near	 0951	  _TEXT	
+read_cpm_7 . . . . . . . . . . .	L Near	 094A	  _TEXT	
+read_cpm_8 . . . . . . . . . . .	L Near	 0959	  _TEXT	
+read_cpm_exit  . . . . . . . . .	L Near	 096B	  _TEXT	
+read_cpm_file  . . . . . . . . .	L Near	 084F	  _TEXT	
+read_em_1  . . . . . . . . . . .	L Near	 07F9	  _TEXT	
+read_em_2  . . . . . . . . . . .	L Near	 0804	  _TEXT	
+read_em_31 . . . . . . . . . . .	L Near	 07F5	  _TEXT	
+read_em_3  . . . . . . . . . . .	L Near	 0807	  _TEXT	
+read_em_4  . . . . . . . . . . .	L Near	 081C	  _TEXT	
+read_em_5  . . . . . . . . . . .	L Near	 0836	  _TEXT	
+read_em_exit . . . . . . . . . .	L Near	 0848	  _TEXT	
+read_emulator  . . . . . . . . .	L Near	 07D6	  _TEXT	
+reset_disk2  . . . . . . . . . .	L Near	 05AC	  _TEXT	
+ret_reg  . . . . . . . . . . . .	Text   	 di
+save_bp  . . . . . . . . . . . .	Word	 0104	  _TEXT	
+save_cx  . . . . . . . . . . . .	Word	 010A	  _TEXT	
+save_di  . . . . . . . . . . . .	Word	 0106	  _TEXT	
+save_dx  . . . . . . . . . . . .	Word	 010C	  _TEXT	
+save_si  . . . . . . . . . . . .	Word	 0108	  _TEXT	
+search_env_exit_1  . . . . . . .	L Near	 07CE	  _TEXT	
+search_env_exit  . . . . . . . .	L Near	 07D1	  _TEXT	
+search_env_get . . . . . . . . .	L Near	 07C4	  _TEXT	
+search_env_match_1 . . . . . . .	L Near	 079F	  _TEXT	
+search_env_match_2 . . . . . . .	L Near	 07BA	  _TEXT	
+search_env_match_3 . . . . . . .	L Near	 07A2	  _TEXT	
+search_env_match_4 . . . . . . .	L Near	 07AF	  _TEXT	
+search_env_next_1  . . . . . . .	L Near	 078B	  _TEXT	
+search_env_next_2  . . . . . . .	L Near	 0783	  _TEXT	
+search_env_next_3  . . . . . . .	L Near	 0787	  _TEXT	
+search_env_next_4  . . . . . . .	L Near	 0779	  _TEXT	
+search_env_next_5  . . . . . . .	L Near	 0794	  _TEXT	
+search_env . . . . . . . . . . .	L Near	 076B	  _TEXT	
+set_cpm_10 . . . . . . . . . . .	L Near	 09A2	  _TEXT	
+set_cpm_11 . . . . . . . . . . .	L Near	 09A8	  _TEXT	
+set_cpm_loop . . . . . . . . . .	L Near	 0997	  _TEXT	
+set_file_attr  . . . . . . . . .	L Near	 05AC	  _TEXT	
+set_io_byte  . . . . . . . . . .	L Near	 0565	  _TEXT	
+set_ro . . . . . . . . . . . . .	L Near	 05AC	  _TEXT	
+set_user_code_0  . . . . . . . .	L Near	 05A9	  _TEXT	
+set_user_code  . . . . . . . . .	L Near	 05A1	  _TEXT	
+setup_cpm_area . . . . . . . . .	L Near	 096C	  _TEXT	
+sonomama . . . . . . . . . . . .	L Near	 0548	  _TEXT	
+start  . . . . . . . . . . . . .	L Near	 0100	  _TEXT	
+to_bdos  . . . . . . . . . . . .	L Near	 03EE	  _TEXT	
+too_large_com_msg  . . . . . . .	Byte	 06FE	  _TEXT	
+too_large_com  . . . . . . . . .	L Near	 0754	  _TEXT	
+too_long_path_msg  . . . . . . .	Byte	 06EF	  _TEXT	
+too_long_path  . . . . . . . . .	L Near	 074F	  _TEXT	
+z80_error_0  . . . . . . . . . .	L Near	 04C6	  _TEXT	
+z80_error_6  . . . . . . . . . .	L Near	 04DA	  _TEXT	
+z80_seg  . . . . . . . . . . . .	Word	 010E	  _TEXT	
+z80em_err_addr . . . . . . . . .	Word	 046E	  _TEXT	
+z80em_internal_error . . . . . .	L Near	 0759	  _TEXT	
+
+	   0 Warnings
+	   0 Errors
