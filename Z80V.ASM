@@ -29,6 +29,8 @@
 ;2025/5/18 Rev. 1.10 Convert CP/M arguments to uppercase.
 ;                    Change CPU instruction execution module to Z80EM.BIN
 ;                    Change name 80 to Z80
+;2025/9/21 Rev. 1.20 combination with Z80EMV.BIN 
+;                    (V20/30 8080 emulation mode implemented)
 
 		page 0,150
 		.model	tiny
